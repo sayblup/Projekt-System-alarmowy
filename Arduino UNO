@@ -1,0 +1,557 @@
+const int E = 6;
+const int RS = 7;
+const int DB4 = 8;
+const int DB5 = 9;
+const int DB6 = 10;
+const int DB7 = 11;
+const int ledCzerwony = 2;
+const int pinBuzer = A1;
+const int PIRsens = A2;
+const int PIRsens2 = A3;
+const int btnPanika = 5;
+const int btnMenu = A0;
+
+int A_In = A5;
+int B_In = 3;
+int C_In = 4;
+int D_In = A4;
+
+int st_alarm = 0;
+int czuj_alarm = 0;
+int uzbrojony = 0;
+int ust_czas = 0;    
+int ust_dzwiek = 0;
+
+struct Czujnik {
+  int pin;
+  bool aktywny;
+};
+
+Czujnik czujniki[2] = {
+  {13, false},
+  {12, false}
+};
+
+int ind_czujnik = 0;
+unsigned long tm_czujnik = 0;
+int ind_lista = 0;
+
+const char* poz_menu[] = {"Uzbroj alarm", "Rozbroj alarm", "Ustawienia"};
+const int ile_poz = 3;
+
+const char* poz_submenu[] = {
+  "Dzwiek buzzera",
+  "Dodaj czujnik",
+  "Lista czujnikow",
+  "Test czujnikow",
+  "Czas do wyjscia",
+  "Wroc"
+};
+const int ile_subpoz = 6;
+
+enum Stan { GL_EKRAN, GL_MENU, POD_MENU, DOD_CZUJNIK, LISTA_CZUJN, TEST_CZUJN };
+Stan stan = GL_EKRAN;
+
+int ind_menu = 0;
+int ind_submenu = 0;
+
+unsigned long ost_aktyw = 0;
+const unsigned long czas_limit = 10000;
+unsigned long ost_mig = 0;
+bool st_led = false;
+
+int btn_akt = 0;
+int btn_pop = 0;
+unsigned long tm_deb = 0;
+unsigned long czas_deb = 50;
+bool odswiezaj = true;
+bool btn_pan_pop = HIGH;
+
+void LCD_Write4Bits(unsigned char dane) {
+  digitalWrite(E, LOW);
+  digitalWrite(DB4, (dane & 0x01));
+  digitalWrite(DB5, (dane & 0x02));
+  digitalWrite(DB6, (dane & 0x04));
+  digitalWrite(DB7, (dane & 0x08));
+  digitalWrite(E, HIGH);
+  delay(1);
+  digitalWrite(E, LOW);
+  delay(1);
+}
+
+void LCD_ZapiszDane4Bit(unsigned char dane) {
+  digitalWrite(RS, HIGH);
+  LCD_Write4Bits(dane >> 4);
+  LCD_Write4Bits(dane & 0x0F);
+}
+
+void LCD_ZapiszKom4Bit(unsigned char dane) {
+  digitalWrite(RS, LOW);
+  LCD_Write4Bits(dane >> 4);
+  LCD_Write4Bits(dane & 0x0F);
+}
+
+void LCD_Init4bit() {
+  delay(50);
+  digitalWrite(RS, LOW);
+  digitalWrite(E, LOW);
+  LCD_Write4Bits(0x03); delay(5);
+  LCD_Write4Bits(0x03); delay(5);
+  LCD_Write4Bits(0x03); delay(5);
+  LCD_Write4Bits(0x02);
+  LCD_ZapiszKom4Bit(0x28);
+  LCD_ZapiszKom4Bit(0x0C);
+  LCD_ZapiszKom4Bit(0x01);
+  delay(5);
+  LCD_ZapiszKom4Bit(0x06);
+}
+
+void LCD_Tekst(const char *tekst) {
+  while (*tekst) {
+    LCD_ZapiszDane4Bit(*tekst++);
+  }
+}
+
+void LCD_Wyczysc() {
+  LCD_ZapiszKom4Bit(0x01);
+  delay(5);
+}
+
+
+void aktualizujBCD(int i) {
+  digitalWrite(A_In, (i%2));
+  digitalWrite(B_In, ((i/2)%2));
+  digitalWrite(C_In, ((i/4)%2));
+  digitalWrite(D_In, ((i/8)%2));
+}
+
+void uzbroj() {
+  LCD_Wyczysc();
+  LCD_ZapiszKom4Bit(0x80);
+  LCD_Tekst(" CZAS NA WYJSCIE!");
+
+  aktualizujBCD(2); 
+
+  int sek_opozn = (ust_czas == 0) ? 5 : 9;
+  for (int i = sek_opozn; i > 0; i--) {
+    LCD_ZapiszKom4Bit(0xC0);
+    LCD_Tekst(" Zostalo: ");
+    char bufor[4];
+    itoa(i, bufor, 10);
+    LCD_Tekst(bufor);
+    LCD_Tekst("s   ");
+
+    tone(pinBuzer, 1500); delay(100); noTone(pinBuzer);
+    delay(900);
+  }
+
+  uzbrojony = 1;
+  LCD_Wyczysc();
+  LCD_ZapiszKom4Bit(0x80);
+  LCD_Tekst(" SYSTEM UZBROJONY!");
+  tone(pinBuzer, 2000); delay(500); noTone(pinBuzer);
+  delay(1000);
+  stan = GL_EKRAN;
+  odswiezaj = true;
+}
+
+void rozbroj() {
+  uzbrojony = 0;
+  st_alarm = 0;
+  LCD_Wyczysc();
+  LCD_ZapiszKom4Bit(0x80);
+  LCD_Tekst(" SYSTEM ROZBROJONY");
+  delay(1500);
+  stan = GL_EKRAN;
+  odswiezaj = true;
+}
+
+void wykonajGlMenu(int ind) {
+  switch (ind) {
+    case 0:
+      uzbroj();
+      break;
+    case 1:
+      rozbroj();
+      break;
+    case 2:
+      stan = POD_MENU;
+      ind_submenu = 0;
+      odswiezaj = true;
+      break;
+  }
+}
+
+void wykonajPodMenu(int ind) {
+  switch (ind) {
+    case 0:
+      ust_dzwiek = !ust_dzwiek;
+      tone(pinBuzer, ust_dzwiek == 0 ? 2000 : 1000);
+      delay(300);
+      noTone(pinBuzer);
+      odswiezaj = true;
+      break;
+    case 1:
+      ind_czujnik = 0;
+      tm_czujnik = millis();
+      stan = DOD_CZUJNIK;
+      odswiezaj = true;
+      break;
+    case 2:
+      ind_lista = 0;
+      stan = LISTA_CZUJN;
+      odswiezaj = true;
+      break;
+    case 3:
+      LCD_Wyczysc();
+      LCD_ZapiszKom4Bit(0x80);
+      LCD_Tekst("Czekam na ruch..");
+      stan = TEST_CZUJN;
+      ost_aktyw = millis();
+      break;
+    case 4:
+      ust_czas = !ust_czas;
+      odswiezaj = true;
+      break;
+    case 5:
+      stan = GL_MENU;
+      odswiezaj = true;
+      break;
+  }
+}
+
+void aktualizujEkran() {
+  if (stan != TEST_CZUJN) {
+    LCD_Wyczysc();
+  }
+
+  if (stan == GL_EKRAN) {
+    LCD_ZapiszKom4Bit(0x80);
+    if (st_alarm == 1) {
+      LCD_Tekst("!! WLAMANIE !!");
+      LCD_ZapiszKom4Bit(0xC0);
+      LCD_Tekst(" WEZWIJ POLICJE");
+    } else {
+      if (uzbrojony) {
+        LCD_Tekst(" ALARM AKTYWNY");
+      } else {
+        LCD_Tekst(" ALARM WYLACZONY");
+      }
+      LCD_ZapiszKom4Bit(0xC0);
+      LCD_Tekst("nr ind. 21557");
+    }
+  }
+  else if (stan == GL_MENU) {
+    LCD_ZapiszKom4Bit(0x80);
+    LCD_Tekst(">");
+    LCD_Tekst(poz_menu[ind_menu]);
+  }
+  else if (stan == POD_MENU) {
+    LCD_ZapiszKom4Bit(0x80);
+    LCD_Tekst(">");
+    LCD_Tekst(poz_submenu[ind_submenu]);
+
+    LCD_ZapiszKom4Bit(0xC0);
+    if (ind_submenu == 0) {
+      LCD_Tekst(ust_dzwiek == 0 ? " Ton Wysoki" : " Ton Niski");
+    }
+    else if (ind_submenu == 4) {
+      LCD_Tekst(ust_czas == 0 ? " Wybrano: 5s" : " Wybrano: 9s");
+    }
+  }
+  else if (stan == DOD_CZUJNIK) {
+    LCD_ZapiszKom4Bit(0x80);
+    LCD_Tekst("Dodaj czujnik");
+
+    LCD_ZapiszKom4Bit(0xC0);
+    if (ind_czujnik == 0) {
+      LCD_Tekst("PIN 13");
+    } else {
+      LCD_Tekst("PIN 12");
+    }
+  }
+  else if (stan == LISTA_CZUJN) {
+    int aktyw_piny[4];
+    int licznik = 0;
+    aktyw_piny[licznik++] = A2;
+    aktyw_piny[licznik++] = A3;
+    if (czujniki[0].aktywny) aktyw_piny[licznik++] = czujniki[0].pin;
+    if (czujniki[1].aktywny) aktyw_piny[licznik++] = czujniki[1].pin;
+
+    LCD_ZapiszKom4Bit(0x80);
+    LCD_Tekst("Aktywne czujniki");
+    LCD_ZapiszKom4Bit(0xC0);
+    LCD_Tekst("> PIN ");
+
+    if (aktyw_piny[ind_lista] == A2) LCD_Tekst("A2");
+    else if (aktyw_piny[ind_lista] == A3) LCD_Tekst("A3");
+    else {
+      char bufor[4];
+      itoa(aktyw_piny[ind_lista], bufor, 10);
+      LCD_Tekst(bufor);
+    }
+  }
+}
+
+void setup() {
+  pinMode(E, OUTPUT);
+  pinMode(RS, OUTPUT);
+  pinMode(DB4, OUTPUT);
+  pinMode(DB5, OUTPUT);
+  pinMode(DB6, OUTPUT);
+  pinMode(DB7, OUTPUT);
+
+  pinMode(ledCzerwony, OUTPUT);
+  pinMode(pinBuzer, OUTPUT);
+
+  pinMode(PIRsens, INPUT);
+  pinMode(PIRsens2, INPUT);
+  pinMode(13, INPUT);
+  pinMode(12, INPUT);
+  pinMode(btnPanika, INPUT_PULLUP);
+
+  pinMode(A_In, OUTPUT);
+  pinMode(B_In, OUTPUT);
+  pinMode(C_In, OUTPUT);
+  pinMode(D_In, OUTPUT);
+
+  LCD_Init4bit();
+  aktualizujEkran();
+}
+
+void loop() {
+  
+  if (st_alarm == 1) {
+    aktualizujBCD(3);
+  } else if (uzbrojony == 1) {
+    aktualizujBCD(1);
+  } else if (stan == GL_EKRAN) {
+    aktualizujBCD(0);
+  } else {
+    aktualizujBCD(8);
+  }
+
+  int val_analog = analogRead(btnMenu);
+  int btn_wc = 0;
+
+  if (val_analog > 1000) {
+    btn_wc = 3;
+  } else if (val_analog > 760 && val_analog < 810) {
+    btn_wc = 1;
+  } else if (val_analog > 510 && val_analog < 560) {
+    btn_wc = 2;
+  } else {
+    btn_wc = 0;
+  }
+
+  if (btn_wc != btn_pop) {
+    tm_deb = millis();
+  }
+
+  if ((millis() - tm_deb) > czas_deb) {
+    if (btn_wc != btn_akt) {
+      btn_akt = btn_wc;
+
+      if (btn_akt != 0) {
+        ost_aktyw = millis();
+
+        if (stan == GL_EKRAN) {
+          stan = GL_MENU;
+          ind_menu = 0;
+          odswiezaj = true;
+        }
+        else if (stan == GL_MENU) {
+          if (btn_akt == 1) {
+            ind_menu--;
+            if (ind_menu < 0) ind_menu = ile_poz - 1;
+            odswiezaj = true;
+          }
+          else if (btn_akt == 2) {
+            ind_menu++;
+            if (ind_menu >= ile_poz) ind_menu = 0;
+            odswiezaj = true;
+          }
+          else if (btn_akt == 3) {
+            wykonajGlMenu(ind_menu);
+          }
+        }
+        else if (stan == POD_MENU) {
+          if (btn_akt == 1) {
+            ind_submenu--;
+            if (ind_submenu < 0) ind_submenu = ile_subpoz - 1;
+            odswiezaj = true;
+          }
+          else if (btn_akt == 2) {
+            ind_submenu++;
+            if (ind_submenu >= ile_subpoz) ind_submenu = 0;
+            odswiezaj = true;
+          }
+          else if (btn_akt == 3) {
+            wykonajPodMenu(ind_submenu);
+          }
+        }
+        else if (stan == DOD_CZUJNIK) {
+          if (btn_akt == 1) {
+            ind_czujnik--;
+            if (ind_czujnik < 0) ind_czujnik = 1;
+            tm_czujnik = millis();
+            odswiezaj = true;
+          }
+          else if (btn_akt == 2) {
+            ind_czujnik++;
+            if (ind_czujnik > 1) ind_czujnik = 0;
+            tm_czujnik = millis();
+            odswiezaj = true;
+          }
+          else if (btn_akt == 3) {
+            czujniki[ind_czujnik].aktywny = true;
+            tone(pinBuzer, 1500);
+            delay(200);
+            noTone(pinBuzer);
+            stan = POD_MENU;
+            odswiezaj = true;
+          }
+        }
+        else if (stan == LISTA_CZUJN) {
+          int ile_aktyw = 2 + (czujniki[0].aktywny ? 1 : 0) + (czujniki[1].aktywny ? 1 : 0);
+
+          if (btn_akt == 1) {
+            ind_lista--;
+            if (ind_lista < 0) ind_lista = ile_aktyw - 1;
+            odswiezaj = true;
+          }
+          else if (btn_akt == 2) {
+            ind_lista++;
+            if (ind_lista >= ile_aktyw) ind_lista = 0;
+            odswiezaj = true;
+          }
+          else if (btn_akt == 3) {
+            stan = POD_MENU;
+            odswiezaj = true;
+          }
+        }
+        else if (stan == TEST_CZUJN) {
+          if (btn_akt == 3 || btn_akt == 1 || btn_akt == 2) {
+            stan = POD_MENU;
+            odswiezaj = true;
+          }
+        }
+      }
+    }
+  }
+  btn_pop = btn_wc;
+
+  bool btn_pan_akt = digitalRead(btnPanika);
+  if (btn_pan_pop == HIGH && btn_pan_akt == LOW) {
+    uzbrojony = 0;
+    st_alarm = 0;
+    czuj_alarm = 0;
+    noTone(pinBuzer);
+    stan = GL_EKRAN;
+    odswiezaj = true;
+    delay(50);
+  }
+  btn_pan_pop = btn_pan_akt;
+
+  if (stan == DOD_CZUJNIK) {
+    if (millis() - tm_czujnik > 5000) {
+      stan = POD_MENU;
+      odswiezaj = true;
+    }
+  }
+
+  unsigned long akt_limit = (stan == TEST_CZUJN) ? 30000 : czas_limit;
+
+  if (stan != GL_EKRAN && stan != DOD_CZUJNIK && (millis() - ost_aktyw > akt_limit)) {
+    stan = GL_EKRAN;
+    odswiezaj = true;
+  }
+
+  if (stan == TEST_CZUJN) {
+    bool r1 = (digitalRead(PIRsens) == HIGH);
+    bool r2 = (digitalRead(PIRsens2) == HIGH);
+    bool r3 = czujniki[0].aktywny ? (digitalRead(czujniki[0].pin) == HIGH) : false;
+    bool r4 = czujniki[1].aktywny ? (digitalRead(czujniki[1].pin) == HIGH) : false;
+
+    int pin_wykr = -1;
+    if (r1) pin_wykr = A2;
+    else if (r2) pin_wykr = A3;
+    else if (r3) pin_wykr = czujniki[0].pin;
+    else if (r4) pin_wykr = czujniki[1].pin;
+
+    if (pin_wykr != -1) {
+      aktualizujBCD(4); 
+
+      LCD_Wyczysc();
+      LCD_ZapiszKom4Bit(0x80);
+      LCD_Tekst("Wykryto ruch!");
+      LCD_ZapiszKom4Bit(0xC0);
+      LCD_Tekst("Czujnik PIN: ");
+
+      if (pin_wykr == A2) LCD_Tekst("A2");
+      else if (pin_wykr == A3) LCD_Tekst("A3");
+      else {
+        char bufor[4];
+        itoa(pin_wykr, bufor, 10);
+        LCD_Tekst(bufor);
+      }
+
+      delay(1500);
+
+      LCD_Wyczysc();
+      LCD_ZapiszKom4Bit(0x80);
+      LCD_Tekst("Czekam na ruch..");
+      ost_aktyw = millis();
+    }
+  }
+
+  if (odswiezaj) {
+    aktualizujEkran();
+    odswiezaj = false;
+  }
+
+  bool ruch1 = (digitalRead(PIRsens) == HIGH);
+  bool ruch2 = (digitalRead(PIRsens2) == HIGH);
+  bool ruch3 = false;
+  bool ruch4 = false;
+
+  if (czujniki[0].aktywny) ruch3 = digitalRead(czujniki[0].pin);
+  if (czujniki[1].aktywny) ruch4 = digitalRead(czujniki[1].pin);
+
+  if (uzbrojony && (ruch1 || ruch2 || ruch3 || ruch4)) {
+    czuj_alarm++;
+    delay(100);
+
+    if (czuj_alarm >= 3) {
+      if (st_alarm == 0) {
+        stan = GL_EKRAN;
+        odswiezaj = true;
+      }
+      st_alarm = 1;
+      czuj_alarm = 0;
+    }
+  }
+
+  if (!ruch1 && !ruch2 && !ruch3 && !ruch4) {
+    czuj_alarm = 0;
+  }
+
+  if (st_alarm) {
+    if (millis() - ost_mig > 200) {
+      ost_mig = millis();
+      st_led = !st_led;
+      digitalWrite(ledCzerwony, st_led);
+
+      if (st_led) {
+        tone(pinBuzer, ust_dzwiek == 0 ? 2000 : 1000);
+      } else {
+        noTone(pinBuzer);
+      }
+    }
+  } else {
+    digitalWrite(ledCzerwony, LOW);
+    if (stan != POD_MENU && stan != GL_MENU && stan != DOD_CZUJNIK) {
+      noTone(pinBuzer);
+    }
+  }
+}
